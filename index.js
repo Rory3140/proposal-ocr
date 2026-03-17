@@ -274,7 +274,7 @@ app.get("/", (req, res) => {
 });
 
 // Main OCR endpoint
-app.post("/ocr", async (req, res) => {
+app.post("/ocr/design", async (req, res) => {
   try {
     const { pdf_url, api_key, bubble_env } = req.body;
 
@@ -521,6 +521,48 @@ app.post("/ocr/debug", async (req, res) => {
     });
   } catch (err) {
     console.error("Debug OCR Error:", err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// Manual J endpoint — extracts whole-house heat and cool from page 1
+app.post("/ocr/manualj", async (req, res) => {
+  try {
+    const { pdf_url, api_key } = req.body;
+
+    if (!pdf_url) return res.status(400).json({ error: "pdf_url is required" });
+    if (!api_key) return res.status(400).json({ error: "api_key is required" });
+
+    let fileUrl = pdf_url;
+    if (fileUrl.startsWith("//")) fileUrl = "https:" + fileUrl;
+    else if (!fileUrl.startsWith("http")) fileUrl = "https:" + fileUrl;
+
+    const fileResponse = await fetch(fileUrl);
+    if (!fileResponse.ok) {
+      return res.status(400).json({ error: `Failed to fetch PDF: ${fileResponse.status}` });
+    }
+    const fileBuffer = await fileResponse.arrayBuffer();
+    const base64File = Buffer.from(fileBuffer).toString("base64");
+
+    const result = await callVision(base64File, [1], api_key);
+    if (result.error) return res.status(500).json({ error: result.error.message });
+
+    const pageResponse = result.responses?.[0]?.responses?.[0];
+    if (!pageResponse?.fullTextAnnotation) {
+      return res.status(500).json({ error: "No text found on page 1" });
+    }
+
+    const text = pageResponse.fullTextAnnotation.text || "";
+
+    const heatMatch = text.match(/Heat:\s*([\d,]+\s*Btuh)/i);
+    const coolMatch = text.match(/Cool:\s*([\d,]+\s*Btuh)/i);
+
+    return res.json({
+      heat: heatMatch ? heatMatch[1].trim() : null,
+      cool: coolMatch ? coolMatch[1].trim() : null,
+    });
+  } catch (err) {
+    console.error("Manual J OCR Error:", err);
     return res.status(500).json({ error: err.message });
   }
 });
