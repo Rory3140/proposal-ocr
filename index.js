@@ -240,6 +240,42 @@ function parseContentPage(pageResponse) {
   return data;
 }
 
+function parseNum(str) {
+  if (typeof str !== "string") return str;
+  const n = parseFloat(str.replace(/,/g, ""));
+  return isNaN(n) ? str : n;
+}
+
+function normalizeData(data) {
+  const out = { ...data };
+
+  // "12,011 Btuh" → 12011
+  for (const key of ["heat", "cool"]) {
+    if (out[key]) out[key] = parseNum(out[key].replace(/\s*btuh/i, ""));
+  }
+
+  // "15K BTUh" → 15000
+  if (out.capacity) {
+    const m = out.capacity.match(/([\d.]+)(K?)\s*BTUh/i);
+    if (m) out.capacity = parseFloat(m[1]) * (m[2].toUpperCase() === "K" ? 1000 : 1);
+  }
+
+  // "9.1 ft" → 9.1, "206 sq ft" → 206, "1,872 cu ft" → 1872
+  if (out.height) out.height = parseNum(out.height);
+  if (out.floor_area) out.floor_area = parseNum(out.floor_area);
+  if (out.volume) out.volume = parseNum(out.volume);
+
+  // Already numeric strings
+  for (const key of [
+    "latent_cooling", "sensible_cooling", "sensible_ratio_(shr)",
+    "cfm_heating", "cfm_cooling", "#_of_windows", "#_of_exterior_walls",
+  ]) {
+    if (out[key] !== undefined) out[key] = parseNum(out[key]);
+  }
+
+  return out;
+}
+
 async function uploadPageImage(pngBuffer, pageNum, bubbleEnv) {
   const metadata = await sharp(pngBuffer).metadata();
   const cropWidth = Math.floor(metadata.width * 0.713);
@@ -366,7 +402,7 @@ app.post("/ocr/design", async (req, res) => {
     for (let i = 1; i < allResponses.length; i++) {
       pages.push({
         page: i + 1,
-        data: parseContentPage(allResponses[i]),
+        data: normalizeData(parseContentPage(allResponses[i])),
         image_url: imageUrls[i - 1],
       });
     }
@@ -554,12 +590,12 @@ app.post("/ocr/manualj", async (req, res) => {
 
     const text = pageResponse.fullTextAnnotation.text || "";
 
-    const heatMatch = text.match(/Heat:\s*([\d,]+\s*Btuh)/i);
-    const coolMatch = text.match(/Cool:\s*([\d,]+\s*Btuh)/i);
+    const heatMatch = text.match(/Heat:\s*([\d,]+)\s*Btuh/i);
+    const coolMatch = text.match(/Cool:\s*([\d,]+)\s*Btuh/i);
 
     return res.json({
-      heat: heatMatch ? heatMatch[1].trim() : null,
-      cool: coolMatch ? coolMatch[1].trim() : null,
+      heat: heatMatch ? parseNum(heatMatch[1]) : null,
+      cool: coolMatch ? parseNum(coolMatch[1]) : null,
     });
   } catch (err) {
     console.error("Manual J OCR Error:", err);
