@@ -1,12 +1,14 @@
 const express = require("express");
 const cors = require("cors");
+const sharp = require("sharp");
+const axios = require("axios");
+const pdfImgConvert = require("pdf-img-convert");
 
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: "50mb" }));
 
 const PORT = process.env.PORT || 8080;
-const GOOGLE_VISION_API_KEY = process.env.GOOGLE_VISION_API_KEY || "";
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -238,6 +240,32 @@ function parseContentPage(pageResponse) {
   return data;
 }
 
+async function uploadPageImage(pngBuffer, pageNum, bubbleEnv) {
+  const metadata = await sharp(pngBuffer).metadata();
+  const cropWidth = Math.floor(metadata.width * 0.713);
+  const croppedBuffer = await sharp(pngBuffer)
+    .extract({ left: 0, top: 0, width: cropWidth, height: metadata.height })
+    .png()
+    .toBuffer();
+
+  const base64Png = croppedBuffer.toString("base64");
+  const version = bubbleEnv === "test" ? "version-test" : "version-live";
+  const result = await axios.post(
+    `https://amplify.plugpv.com/${version}/fileupload`,
+    {
+      name: `proposal_page_${pageNum}.png`,
+      contents: base64Png,
+      private: false,
+    }
+  );
+
+  let imageUrl = result.data;
+  if (typeof imageUrl === "string" && imageUrl.startsWith("//")) {
+    imageUrl = "https:" + imageUrl;
+  }
+  return imageUrl;
+}
+
 // ─── Routes ─────────────────────────────────────────────────────────────────
 
 // Health check
@@ -248,16 +276,13 @@ app.get("/", (req, res) => {
 // Main OCR endpoint
 app.post("/ocr", async (req, res) => {
   try {
-    const { pdf_url, api_key } = req.body;
-    const apiKey = api_key || GOOGLE_VISION_API_KEY;
+    const { pdf_url, api_key, bubble_env } = req.body;
 
     if (!pdf_url) {
       return res.status(400).json({ error: "pdf_url is required" });
     }
-    if (!apiKey) {
-      return res
-        .status(400)
-        .json({ error: "api_key is required (body or env var)" });
+    if (!api_key) {
+      return res.status(400).json({ error: "api_key is required" });
     }
 
     // Normalize URL
@@ -265,7 +290,7 @@ app.post("/ocr", async (req, res) => {
     if (fileUrl.startsWith("//")) fileUrl = "https:" + fileUrl;
     else if (!fileUrl.startsWith("http")) fileUrl = "https:" + fileUrl;
 
-    // Fetch PDF and convert to base64
+    // Fetch PDF
     const fileResponse = await fetch(fileUrl);
     if (!fileResponse.ok) {
       return res
@@ -273,10 +298,14 @@ app.post("/ocr", async (req, res) => {
         .json({ error: `Failed to fetch PDF: ${fileResponse.status}` });
     }
     const fileBuffer = await fileResponse.arrayBuffer();
-    const base64File = Buffer.from(fileBuffer).toString("base64");
+    const pdfBuffer = Buffer.from(fileBuffer);
+    const base64File = pdfBuffer.toString("base64");
 
-    // First batch: pages 1-5 (also gets totalPages)
-    const firstResult = await callVision(base64File, [1, 2, 3, 4, 5], apiKey);
+    // Run first Vision batch and PDF image conversion in parallel
+    const [firstResult, pdfImages] = await Promise.all([
+      callVision(base64File, [1, 2, 3, 4, 5], api_key),
+      pdfImgConvert.convert(pdfBuffer, { base64: false, width: 1400 }),
+    ]);
 
     if (firstResult.error) {
       return res.status(500).json({ error: firstResult.error.message });
@@ -293,7 +322,7 @@ app.post("/ocr", async (req, res) => {
 
     const totalPages = firstResult.responses[0].totalPages || allResponses.length;
 
-    // Fetch remaining pages in parallel
+    // Fetch remaining Vision pages in parallel
     if (totalPages > 5) {
       const batchPromises = [];
       for (let startPage = 6; startPage <= totalPages; startPage += 5) {
@@ -301,7 +330,7 @@ app.post("/ocr", async (req, res) => {
         for (let p = startPage; p < startPage + 5 && p <= totalPages; p++) {
           pageNums.push(p);
         }
-        batchPromises.push(callVision(base64File, pageNums, apiKey));
+        batchPromises.push(callVision(base64File, pageNums, api_key));
       }
 
       const batchResults = await Promise.all(batchPromises);
@@ -319,12 +348,26 @@ app.post("/ocr", async (req, res) => {
     // Parse page 1 (title page)
     const info = parsePage1(allResponses[0]);
 
-    // Parse content pages
+    // Upload images for pages 2+ in parallel
+    const imageUploadPromises = [];
+    for (let i = 1; i < allResponses.length; i++) {
+      const pageNum = i + 1;
+      const imgBuffer = pdfImages[i] ? Buffer.from(pdfImages[i]) : null;
+      imageUploadPromises.push(
+        imgBuffer
+          ? uploadPageImage(imgBuffer, pageNum, bubble_env).catch(() => null)
+          : Promise.resolve(null)
+      );
+    }
+    const imageUrls = await Promise.all(imageUploadPromises);
+
+    // Build pages array
     const pages = [];
     for (let i = 1; i < allResponses.length; i++) {
       pages.push({
         page: i + 1,
         data: parseContentPage(allResponses[i]),
+        image_url: imageUrls[i - 1],
       });
     }
 
@@ -345,10 +388,9 @@ app.post("/ocr", async (req, res) => {
 app.post("/ocr/debug", async (req, res) => {
   try {
     const { pdf_url, api_key, page_number } = req.body;
-    const apiKey = api_key || GOOGLE_VISION_API_KEY;
 
     if (!pdf_url) return res.status(400).json({ error: "pdf_url is required" });
-    if (!apiKey) return res.status(400).json({ error: "api_key is required" });
+    if (!api_key) return res.status(400).json({ error: "api_key is required" });
 
     let fileUrl = pdf_url;
     if (fileUrl.startsWith("//")) fileUrl = "https:" + fileUrl;
@@ -365,7 +407,7 @@ app.post("/ocr/debug", async (req, res) => {
 
     // If specific page requested, only fetch that page
     const pageNums = page_number ? [page_number] : [1, 2, 3, 4, 5];
-    const result = await callVision(base64File, pageNums, apiKey);
+    const result = await callVision(base64File, pageNums, api_key);
 
     if (result.error) {
       return res.status(500).json({ error: result.error.message });
