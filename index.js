@@ -1,8 +1,19 @@
 const express = require("express");
 const cors = require("cors");
 const sharp = require("sharp");
-const axios = require("axios");
+const { google } = require("googleapis");
 const pdfImgConvert = require("pdf-img-convert");
+
+// Build Drive auth from env var containing service account JSON
+function getDriveAuth() {
+  const json = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
+  if (!json) throw new Error("GOOGLE_SERVICE_ACCOUNT_JSON env var is not set");
+  const credentials = JSON.parse(json);
+  return new google.auth.GoogleAuth({
+    credentials,
+    scopes: ["https://www.googleapis.com/auth/drive"],
+  });
+}
 
 const app = express();
 app.use(cors());
@@ -276,7 +287,7 @@ function normalizeData(data) {
   return out;
 }
 
-async function uploadPageImage(pngBuffer, pageNum, bubbleEnv) {
+async function uploadPageImage(pngBuffer, pageNum, folderId, driveAuth) {
   const metadata = await sharp(pngBuffer).metadata();
   const cropWidth = Math.floor(metadata.width * 0.713);
   const croppedBuffer = await sharp(pngBuffer)
@@ -284,22 +295,32 @@ async function uploadPageImage(pngBuffer, pageNum, bubbleEnv) {
     .png()
     .toBuffer();
 
-  const base64Png = croppedBuffer.toString("base64");
-  const version = bubbleEnv === "test" ? "version-test" : "version-live";
-  const result = await axios.post(
-    `https://amplify.plugpv.com/${version}/fileupload`,
-    {
-      name: `proposal_page_${pageNum}.png`,
-      contents: base64Png,
-      private: false,
-    }
-  );
+  const { Readable } = require("stream");
+  const drive = google.drive({ version: "v3", auth: driveAuth });
 
-  let imageUrl = result.data;
-  if (typeof imageUrl === "string" && imageUrl.startsWith("//")) {
-    imageUrl = "https:" + imageUrl;
-  }
-  return imageUrl;
+  const file = await drive.files.create({
+    supportsAllDrives: true,
+    requestBody: {
+      name: `proposal_page_${pageNum}.png`,
+      parents: folderId ? [folderId] : [],
+    },
+    media: {
+      mimeType: "image/png",
+      body: Readable.from(croppedBuffer),
+    },
+    fields: "id",
+  });
+
+  const fileId = file.data.id;
+
+  // Make the file publicly readable so the URL works without auth
+  await drive.permissions.create({
+    fileId,
+    supportsAllDrives: true,
+    requestBody: { role: "reader", type: "anyone" },
+  });
+
+  return `https://drive.google.com/file/d/${fileId}/view`;
 }
 
 // ─── Routes ─────────────────────────────────────────────────────────────────
@@ -312,7 +333,7 @@ app.get("/", (req, res) => {
 // Main OCR endpoint
 app.post("/ocr/design", async (req, res) => {
   try {
-    const { pdf_url, api_key, bubble_env } = req.body;
+    const { pdf_url, api_key, google_drive_folder_id } = req.body;
 
     if (!pdf_url) {
       return res.status(400).json({ error: "pdf_url is required" });
@@ -385,13 +406,14 @@ app.post("/ocr/design", async (req, res) => {
     const info = parsePage1(allResponses[0]);
 
     // Upload images for pages 2+ in parallel
+    const driveAuth = getDriveAuth();
     const imageUploadPromises = [];
     for (let i = 1; i < allResponses.length; i++) {
       const pageNum = i + 1;
       const imgBuffer = pdfImages[i] ? Buffer.from(pdfImages[i]) : null;
       imageUploadPromises.push(
         imgBuffer
-          ? uploadPageImage(imgBuffer, pageNum, bubble_env).catch(() => null)
+          ? uploadPageImage(imgBuffer, pageNum, google_drive_folder_id, driveAuth).catch(() => null)
           : Promise.resolve(null)
       );
     }

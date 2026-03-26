@@ -14,14 +14,14 @@ Health check. Returns `{"status":"ok","service":"proposal-ocr-api"}`.
 ---
 
 ### `POST /ocr/design`
-Main endpoint — processes an Amply proposal PDF. Returns structured HVAC data per room plus cropped room images uploaded to Bubble.
+Main endpoint — processes an Amply proposal PDF. Returns structured HVAC data per room plus cropped room images uploaded to Google Drive.
 
 **Request body:**
 ```json
 {
-  "pdf_url": "https://your-bubble-cdn.com/path/to/file.pdf",
+  "pdf_url": "https://example.com/path/to/file.pdf",
   "api_key": "your-google-vision-api-key",
-  "bubble_env": "test"
+  "google_drive_folder_id": "1ABCdef..."
 }
 ```
 
@@ -29,7 +29,7 @@ Main endpoint — processes an Amply proposal PDF. Returns structured HVAC data 
 |-------|----------|-------------|
 | `pdf_url` | Yes | URL to the proposal PDF (supports `//` prefix) |
 | `api_key` | Yes | Google Cloud Vision API key |
-| `bubble_env` | No | `"test"` or `"live"` — controls Bubble upload target. Defaults to `"live"` |
+| `google_drive_folder_id` | No | Google Drive folder ID to upload images into. Folder must be shared with the service account. If omitted, uploads to service account's root Drive. |
 
 **Response:**
 ```json
@@ -59,7 +59,7 @@ Main endpoint — processes an Amply proposal PDF. Returns structured HVAC data 
         "#_of_windows": 3,
         "#_of_exterior_walls": 2
       },
-      "image_url": "https://c6bd947...cdn.bubble.io/f12345/proposal_page_2.png"
+      "image_url": "https://drive.google.com/file/d/FILE_ID/view"
     }
   ]
 }
@@ -136,35 +136,16 @@ gcloud run deploy proposal-ocr-api \
 
 ---
 
-## Using from Bubble
+## Google Drive Auth Setup
 
-In your Bubble app, use the API Connector plugin:
+Image uploads use a service account. Set up once:
 
-**For proposal PDFs:**
-1. Method: `POST`
-2. URL: `https://proposal-ocr-api-46710174656.us-east1.run.app/ocr/design`
-3. Headers: `Content-Type: application/json`
-4. Body:
-```json
-{
-  "pdf_url": "<pdf_file>",
-  "api_key": "<your-vision-key>",
-  "bubble_env": "live"
-}
-```
+1. In GCP console, create a service account and download its JSON key
+2. Enable the **Google Drive API** on GCP project `white-faculty-438720-a3`
+3. Add the key JSON as a Cloud Run secret named `GOOGLE_SERVICE_ACCOUNT_JSON`
+4. Share your target Drive folder with the service account's email (find it in the JSON as `client_email`)
 
-**For Manual J reports:**
-1. Method: `POST`
-2. URL: `https://proposal-ocr-api-46710174656.us-east1.run.app/ocr/manualj`
-3. Body:
-```json
-{
-  "pdf_url": "<pdf_file>",
-  "api_key": "<your-vision-key>"
-}
-```
-
-Use `"bubble_env": "test"` when working in the Bubble test environment.
+The service account only gets `drive.file` scope — it can only see files it uploads itself.
 
 ---
 
