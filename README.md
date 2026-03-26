@@ -2,7 +2,7 @@
 
 Extracts structured HVAC data and room images from Amply proposal PDFs and Manual J reports using Google Cloud Vision OCR.
 
-**Deployed at:** `https://proposal-ocr-api-46710174656.us-east1.run.app`
+**Deployed at:** `https://proposal-ocr-api-46710174656.us-east1.run.app` 
 
 ---
 
