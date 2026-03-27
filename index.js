@@ -4,11 +4,11 @@ const sharp = require("sharp");
 const { google } = require("googleapis");
 const pdfImgConvert = require("pdf-img-convert");
 
-// Build Drive auth from env var containing service account JSON
+// Build Drive auth from env var containing base64-encoded service account JSON
 function getDriveAuth() {
-  const json = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
-  if (!json) throw new Error("GOOGLE_SERVICE_ACCOUNT_JSON env var is not set");
-  const credentials = JSON.parse(json);
+  const b64 = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
+  if (!b64) throw new Error("GOOGLE_SERVICE_ACCOUNT_JSON env var is not set");
+  const credentials = JSON.parse(Buffer.from(b64, "base64").toString("utf8"));
   return new google.auth.GoogleAuth({
     credentials,
     scopes: ["https://www.googleapis.com/auth/drive"],
