@@ -1,18 +1,17 @@
 const express = require("express");
 const cors = require("cors");
 const sharp = require("sharp");
-const { google } = require("googleapis");
+const { Storage } = require("@google-cloud/storage");
 const pdfImgConvert = require("pdf-img-convert");
 
-// Build Drive auth from env var containing base64-encoded service account JSON
-function getDriveAuth() {
+const GCS_BUCKET = "plugpv-proposal-ocr";
+
+// Build GCS client from env var containing base64-encoded service account JSON
+function getStorageClient() {
   const b64 = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
   if (!b64) throw new Error("GOOGLE_SERVICE_ACCOUNT_JSON env var is not set");
   const credentials = JSON.parse(Buffer.from(b64, "base64").toString("utf8"));
-  return new google.auth.GoogleAuth({
-    credentials,
-    scopes: ["https://www.googleapis.com/auth/drive"],
-  });
+  return new Storage({ credentials, projectId: credentials.project_id });
 }
 
 const app = express();
@@ -287,7 +286,7 @@ function normalizeData(data) {
   return out;
 }
 
-async function uploadPageImage(pngBuffer, pageNum, folderId, driveAuth) {
+async function uploadPageImage(pngBuffer, pageNum, storageClient) {
   const metadata = await sharp(pngBuffer).metadata();
   const cropWidth = Math.floor(metadata.width * 0.713);
   const croppedBuffer = await sharp(pngBuffer)
@@ -295,32 +294,12 @@ async function uploadPageImage(pngBuffer, pageNum, folderId, driveAuth) {
     .png()
     .toBuffer();
 
-  const { Readable } = require("stream");
-  const drive = google.drive({ version: "v3", auth: driveAuth });
+  const fileName = `proposal_page_${pageNum}_${Date.now()}.png`;
+  const file = storageClient.bucket(GCS_BUCKET).file(fileName);
 
-  const file = await drive.files.create({
-    supportsAllDrives: true,
-    requestBody: {
-      name: `proposal_page_${pageNum}.png`,
-      parents: folderId ? [folderId] : [],
-    },
-    media: {
-      mimeType: "image/png",
-      body: Readable.from(croppedBuffer),
-    },
-    fields: "id",
-  });
+  await file.save(croppedBuffer, { contentType: "image/png" });
 
-  const fileId = file.data.id;
-
-  // Make the file publicly readable so the URL works without auth
-  await drive.permissions.create({
-    fileId,
-    supportsAllDrives: true,
-    requestBody: { role: "reader", type: "anyone" },
-  });
-
-  return `https://drive.google.com/uc?export=view&id=${fileId}`;
+  return `https://storage.googleapis.com/${GCS_BUCKET}/${fileName}`;
 }
 
 // ─── Routes ─────────────────────────────────────────────────────────────────
@@ -333,7 +312,7 @@ app.get("/", (req, res) => {
 // Main OCR endpoint
 app.post("/ocr/design", async (req, res) => {
   try {
-    const { pdf_url, api_key, google_drive_folder_id } = req.body;
+    const { pdf_url, api_key } = req.body;
 
     if (!pdf_url) {
       return res.status(400).json({ error: "pdf_url is required" });
@@ -406,14 +385,14 @@ app.post("/ocr/design", async (req, res) => {
     const info = parsePage1(allResponses[0]);
 
     // Upload images for pages 2+ in parallel
-    const driveAuth = getDriveAuth();
+    const storageClient = getStorageClient();
     const imageUploadPromises = [];
     for (let i = 1; i < allResponses.length; i++) {
       const pageNum = i + 1;
       const imgBuffer = pdfImages[i] ? Buffer.from(pdfImages[i]) : null;
       imageUploadPromises.push(
         imgBuffer
-          ? uploadPageImage(imgBuffer, pageNum, google_drive_folder_id, driveAuth).catch(() => null)
+          ? uploadPageImage(imgBuffer, pageNum, storageClient).catch(() => null)
           : Promise.resolve(null)
       );
     }

@@ -8,6 +8,7 @@
     "dev": "node index.js"
   },
   "dependencies": {
+    "@google-cloud/storage": "^7.19.0",
     "@napi-rs/canvas": "^0.1.97",
     "canvas": "^2.11.2",
     "cors": "^2.8.5",
