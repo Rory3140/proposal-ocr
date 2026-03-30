@@ -320,7 +320,7 @@ async function uploadPageImage(pngBuffer, pageNum, folderId, driveAuth) {
     requestBody: { role: "reader", type: "anyone" },
   });
 
-  return `https://drive.google.com/file/d/${fileId}/view`;
+  return `https://drive.google.com/uc?export=view&id=${fileId}`;
 }
 
 // ─── Routes ─────────────────────────────────────────────────────────────────
